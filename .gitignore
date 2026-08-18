@@ -1,0 +1,20 @@
+.env
+
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# artefactos de MLflow (se regeneran con train.py)
+mlflow.db
+mlruns/
+
+# modelo y datos derivados (se regeneran con prepare_data.py / train.py)
+models/*.pkl
+data/telco_churn_raw.csv
+data/clientes_entrenamiento.csv
+data/clientes_nuevos.csv
+data/estadisticas_entrenamiento.csv
+
+*.log

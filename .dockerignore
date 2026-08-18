@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+mlflow.db
+mlruns/
+.env
+.git/
+tests/
+data/
