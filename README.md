@@ -1,14 +1,48 @@
-# MLOps end-to-end multi-caso-de-uso (churn + fraude)
+# Plataforma de MLOps para clasificación binaria
 
-Motor genérico de ML en producción — tracking de experimentos, model
-registry, serving vía API, monitoreo de drift, reentrenamiento automático
-y un gate humano de aprobación antes de tocar producción, con un informe
-generado por un LLM — que sirve para **cualquier** problema de
-clasificación binaria enchufado como plugin. Vienen dos casos de uso ya
-armados: **churn** (abandono de clientes, dataset real) y **fraude**
-(detección de fraude en transacciones, dataset sintético).
+Este proyecto es un motor de ML completo — entrenar, comparar experimentos,
+aprobar un modelo, servirlo por API, vigilar que no se desactualice, y
+reentrenar solo cuando hace falta — armado para que **no dependa de un
+dataset en particular**. Se usa de tres formas:
 
-## Arquitectura de plugins
+1. **Subís tu propio CSV a una página web** y te devuelve un análisis
+   automático (estadísticas + un modelo de referencia + un resumen en
+   lenguaje natural) — sin escribir código, en minutos.
+2. **Usás alguno de los dos casos de uso ya armados** de punta a punta:
+   predicción de churn (abandono de clientes, dataset real) o detección
+   de fraude (transacciones, dataset sintético).
+3. **Agregás tu propio caso de uso como plugin** para dejarlo funcionando
+   en un pipeline serio (tracking, aprobación humana, monitoreo, API) —
+   sin tocar el motor.
+
+## Arranque rápido: analizar tu dataset
+
+La forma más rápida de ver el proyecto funcionando es la interfaz web de
+análisis — no requiere descargar nada ni entender la arquitectura:
+
+```bash
+pip install -r requirements-dev.txt
+pip install -e .
+ollama pull llama3.2          # una sola vez — ver "Informe con LLM" más abajo
+
+uvicorn analizador:app --port 8080
+```
+
+Abrís **http://localhost:8080**, subís cualquier CSV, elegís qué columna
+querés predecir de una lista, y te devuelve: cuántas filas/columnas tiene,
+qué tipo de datos, nulos, balance de clases, un RandomForest de referencia
+entrenado al vuelo con sus métricas, y un resumen en lenguaje natural de
+todo eso. Esto es una herramienta de exploración aparte — no toca MLflow
+ni el pipeline de producción de abajo.
+
+## El pipeline de producción (churn / fraude)
+
+El resto de este documento describe el motor completo: tracking de
+experimentos, model registry, serving vía API, monitoreo de drift,
+reentrenamiento automático y un gate humano de aprobación antes de tocar
+producción. Viene con dos casos de uso ya armados.
+
+### Arquitectura de plugins
 
 El motor (`train.py`, `monitor.py`, `serve.py`, `informe.py` dentro de
 `src/churn_mlops/`) no sabe nada de columnas, targets ni costos de negocio
@@ -39,24 +73,28 @@ detección de drift, informe con LLM— no cambia una línea.
 ```
 src/churn_mlops/
   usecases/
-    base.py       contrato UseCase
-    churn.py       plugin: abandono de clientes (IBM Telco, dataset real)
-    fraude.py      plugin: fraude en transacciones (dataset sintético)
-    registry.py    get_usecase(nombre)
-  config.py        settings + paths parametrizados por usecase
-  train.py         motor: pipeline sklearn + MLflow + candidato + promoción
-  serve.py         motor: build_app(usecase) → FastAPI
-  monitor.py       motor: drift (KS + chi-cuadrado) + reentrenamiento
-  informe.py       motor: informe descriptivo con LLM (Ollama/Claude)
+    base.py        contrato UseCase
+    churn.py        plugin: abandono de clientes (IBM Telco, dataset real)
+    fraude.py        plugin: fraude en transacciones (dataset sintético)
+    registry.py      get_usecase(nombre)
+  config.py         settings + paths parametrizados por usecase
+  train.py          motor: pipeline sklearn + MLflow + candidato + promoción
+  serve.py          motor: build_app(usecase) → FastAPI (churn/fraude)
+  monitor.py        motor: drift (KS + chi-cuadrado) + reentrenamiento
+  informe.py        motor: informe descriptivo de experimentos con LLM
+  analizador.py     analizador ad-hoc de datasets subidos (independiente del motor)
+  web_analizador.py interfaz web del analizador
 
 prepare_data.py / train.py / monitor.py / aprobar_modelo.py / generar_informe.py
   entrypoints — todos aceptan --usecase churn|fraude
 serve.py (raíz)
   entrypoint — uvicorn no acepta argparse, así que el usecase se elige con
   la variable de entorno USECASE (default "churn")
+analizador.py (raíz)
+  entrypoint de la interfaz web de análisis ad-hoc (independiente de --usecase)
 ```
 
-## Los dos casos de uso
+### Los dos casos de uso
 
 | | **churn** | **fraude** |
 |---|---|---|
@@ -85,7 +123,7 @@ training vs. los 42 originales), el recall subió de 0.37 a ~0.52 y las
 probabilidades ahora discriminan de verdad entre transacciones normales
 (~0.35) y de alto riesgo (~0.63).
 
-## Qué haría un modelo de estos en producción
+### Qué haría un modelo de estos en producción
 
 El modelo no "decide" nada por sí mismo — solo puntúa. Lo que dispara una
 acción real es el sistema que lo consume:
@@ -108,7 +146,7 @@ reales (descuentos, límites de crédito, bloqueos de tarjeta), un cambio de
 modelo sin revisión puede alterar esas decisiones a gran escala de un día
 para el otro.
 
-## Cómo correrlo, en orden
+### Cómo correrlo, en orden
 
 ```bash
 # Setup
@@ -213,13 +251,15 @@ redacte un análisis: qué se probó, qué configuración rindió mejor y por
 qué, tendencias (over/underfitting), y una conclusión.
 
 Por default usa **Ollama local** (`settings.llm_provider = "ollama"`) —
-gratis, sin API key, sin depender de crédito de ningún proveedor:
+gratis, sin API key, sin depender de crédito de ningún proveedor. El
+analizador ad-hoc de la interfaz web (`analizador.py`, ver arriba) usa el
+mismo mecanismo:
 
 ```bash
 # 1. Instalar Ollama: https://ollama.com/download
 # 2. Bajar un modelo chico (una sola vez)
 ollama pull llama3.2
-# 3. Generar el informe
+# 3. Generar el informe de un caso de uso entrenado
 python generar_informe.py --usecase churn
 ```
 
@@ -267,6 +307,6 @@ default; para `fraude` habría que parametrizar la imagen con `USECASE`.)
 - **Big Data**: si un dataset fuera masivo, `asegurar_datos_crudos()` de
   ese plugin se reemplazaría por un preprocesamiento en Spark antes de
   entrenar
-- **LLMs**: `monitor.py` usa Claude para redactar el reporte de drift, y
-  `generar_informe.py` usa Ollama (o Claude) para el informe descriptivo
-  de experimentos
+- **LLMs**: `monitor.py` usa Claude para redactar el reporte de drift,
+  `generar_informe.py`/`analizador.py` usan Ollama (o Claude) para
+  informes descriptivos generados en lenguaje natural

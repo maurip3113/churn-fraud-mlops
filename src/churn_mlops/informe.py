@@ -112,26 +112,30 @@ def _llamar_anthropic(prompt: str) -> str:
     return respuesta.content[0].text
 
 
+def llamar_llm(prompt: str) -> str:
+    """Despacha el prompt al proveedor configurado (settings.llm_provider).
+    Compartido por generar_informe() y por el analizador ad-hoc de datasets."""
+    if settings.llm_provider == "ollama":
+        return _llamar_ollama(prompt)
+    elif settings.llm_provider == "anthropic":
+        if not settings.anthropic_api_key:
+            return (
+                "[Sin ANTHROPIC_API_KEY configurada — seteá LLM_PROVIDER=ollama "
+                "o completá la key]"
+            )
+        return _llamar_anthropic(prompt)
+    else:
+        raise ValueError(
+            f"llm_provider desconocido: '{settings.llm_provider}' (usar 'ollama' o 'anthropic')"
+        )
+
+
 def generar_informe(usecase: UseCase, runs: list[dict] | None = None) -> str:
     """Genera el informe completo (tabla + análisis del LLM) en Markdown."""
     runs = runs if runs is not None else recolectar_runs(usecase)
     tabla = _tabla_markdown(runs)
     prompt = _construir_prompt(usecase, tabla)
-
-    if settings.llm_provider == "ollama":
-        analisis = _llamar_ollama(prompt)
-    elif settings.llm_provider == "anthropic":
-        if not settings.anthropic_api_key:
-            analisis = (
-                "[Sin ANTHROPIC_API_KEY configurada — seteá LLM_PROVIDER=ollama "
-                "o completá la key]"
-            )
-        else:
-            analisis = _llamar_anthropic(prompt)
-    else:
-        raise ValueError(
-            f"llm_provider desconocido: '{settings.llm_provider}' (usar 'ollama' o 'anthropic')"
-        )
+    analisis = llamar_llm(prompt)
 
     titulo = f"# Informe de experimentos — {usecase.registered_model_name}"
     return f"{titulo}\n\n{tabla}\n## Análisis\n\n{analisis}\n"
