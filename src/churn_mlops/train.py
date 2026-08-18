@@ -115,11 +115,12 @@ def entrenar(df_train: pd.DataFrame, n_estimators: int = 100, max_depth: int = 6
         mlflow.sklearn.log_model(
             pipeline,
             "modelo",
-            registered_model_name="churn_predictor",
+            registered_model_name=settings.registered_model_name,
         )
-
-        settings.models_dir.mkdir(parents=True, exist_ok=True)
-        joblib.dump(pipeline, settings.model_path)
+        # OJO: acá NO se copia el modelo a settings.model_path — entrenar()
+        # solo registra en MLflow. Lo que sirve serve.py se actualiza
+        # únicamente vía promover_a_produccion(), que requiere aprobación
+        # humana explícita (ver aprobar_modelo.py).
 
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         X_train[NUM_FEATURES].describe().to_csv(settings.train_stats_path)
@@ -146,12 +147,14 @@ def run_experiments(df_train: pd.DataFrame) -> None:
     logger.info("Corré 'mlflow ui' para comparar los 3 experimentos visualmente.")
 
 
-def seleccionar_mejor_modelo(metric: str | None = None) -> dict:
+def identificar_mejor_candidato(metric: str | None = None) -> dict:
     """Busca, entre TODOS los runs históricos del experimento, el que mejor
-    puntúa en `metric` (default: recall) y lo promueve a alias "champion" en
-    el Model Registry — ese es el modelo que copiamos a disco para que
-    serve.py lo sirva.
+    puntúa en `metric` (default: recall) y lo deja marcado como candidato
+    pendiente de aprobación en settings.pending_candidate_path.
 
+    A propósito, esta función NO toca el modelo que sirve serve.py ni el
+    alias "champion" del Registry — promover un modelo a producción es una
+    decisión separada y explícita (ver promover_a_produccion / aprobar_modelo.py).
     No se limita a la última corrida de run_experiments(): recorre todo el
     historial, así que sirve para elegir el ganador entre experimentos
     corridos en momentos distintos.
@@ -187,8 +190,53 @@ def seleccionar_mejor_modelo(metric: str | None = None) -> dict:
         )
     version = versiones[0]
 
+    umbral = float(
+        mejor_run.data.params.get("umbral_optimo", settings.prediction_threshold_default)
+    )
+
+    candidato = {
+        "run_id": mejor_run.info.run_id,
+        "run_name": mejor_run.info.run_name,
+        "version": version.version,
+        "metric": metric,
+        "metric_value": valor_metrica,
+        "umbral": umbral,
+    }
+
+    settings.models_dir.mkdir(parents=True, exist_ok=True)
+    settings.pending_candidate_path.write_text(json.dumps(candidato, indent=2))
+
+    logger.info(
+        "Candidato pendiente de aprobación: %s v%s (run '%s') — %s=%.4f. "
+        "Corré 'python aprobar_modelo.py' para revisarlo y promoverlo.",
+        settings.registered_model_name, version.version, mejor_run.info.run_name,
+        metric, valor_metrica,
+    )
+
+    return candidato
+
+
+def promover_a_produccion(candidato: dict | None = None) -> dict:
+    """Promueve un candidato aprobado a producción: alias "champion" en el
+    Model Registry + copia el modelo y su umbral de decisión a disco para
+    que serve.py lo sirva.
+
+    Es el ÚNICO punto del pipeline que efectivamente cambia lo que la API
+    está sirviendo — separado a propósito de identificar_mejor_candidato()
+    para que ese cambio requiera una acción humana explícita en vez de
+    ocurrir solo porque un entrenamiento terminó.
+    """
+    if candidato is None:
+        if not settings.pending_candidate_path.exists():
+            raise RuntimeError(
+                "No hay ningún candidato pendiente. Corré identificar_mejor_candidato() "
+                "(o train.py / monitor.py) primero."
+            )
+        candidato = json.loads(settings.pending_candidate_path.read_text())
+
+    client = MlflowClient()
     client.set_registered_model_alias(
-        settings.registered_model_name, settings.champion_alias, version.version
+        settings.registered_model_name, settings.champion_alias, candidato["version"]
     )
 
     modelo = mlflow.sklearn.load_model(
@@ -197,26 +245,48 @@ def seleccionar_mejor_modelo(metric: str | None = None) -> dict:
     settings.models_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(modelo, settings.model_path)
 
-    umbral = float(
-        mejor_run.data.params.get("umbral_optimo", settings.prediction_threshold_default)
-    )
     settings.threshold_path.write_text(
         json.dumps(
-            {"umbral": umbral, "run_id": mejor_run.info.run_id, "run_name": mejor_run.info.run_name}
+            {
+                "umbral": candidato["umbral"],
+                "run_id": candidato["run_id"],
+                "run_name": candidato["run_name"],
+            }
         )
     )
 
+    if settings.pending_candidate_path.exists():
+        settings.pending_candidate_path.unlink()
+
     logger.info(
-        "Modelo campeón: %s v%s (run '%s') copiado a %s | umbral de decisión: %.2f",
-        settings.registered_model_name, version.version, mejor_run.info.run_name,
-        settings.model_path, umbral,
+        "Modelo promovido a producción: %s v%s (run '%s') copiado a %s | umbral: %.2f",
+        settings.registered_model_name, candidato["version"], candidato["run_name"],
+        settings.model_path, candidato["umbral"],
     )
 
-    return {
-        "run_id": mejor_run.info.run_id,
-        "run_name": mejor_run.info.run_name,
-        "version": version.version,
-        "metric": metric,
-        "metric_value": valor_metrica,
-        "umbral": umbral,
-    }
+    return candidato
+
+
+def reentrenar_con_datos_combinados(df_train: pd.DataFrame, df_nuevo: pd.DataFrame) -> dict:
+    """Reentrena incorporando la cohorte de monitoreo al set de entrenamiento
+    y deja un candidato pendiente de aprobación (NO promueve solo).
+
+    Se dispara desde monitor.py cuando detecta drift significativo
+    (ver evaluar_necesidad_reentrenamiento). La cohorte "nueva" no son datos
+    sin etiqueta: es historia real con el churn ya conocido, así que
+    incorporarla al entrenamiento es información válida — no estamos
+    entrenando con el futuro, estamos ampliando la base con la población
+    más reciente que el modelo venía sin ver.
+
+    Corre los mismos 3 experimentos de run_experiments() sobre el dataset
+    combinado e identifica el mejor candidato entre TODOS los runs
+    históricos (viejos + nuevos) — promoverlo a producción sigue
+    requiriendo aprobación humana vía aprobar_modelo.py.
+    """
+    df_combinado = pd.concat([df_train, df_nuevo], ignore_index=True)
+    logger.info(
+        "Reentrenando con %d filas (%d histórico + %d cohorte de monitoreo)",
+        len(df_combinado), len(df_train), len(df_nuevo),
+    )
+    run_experiments(df_combinado)
+    return identificar_mejor_candidato()

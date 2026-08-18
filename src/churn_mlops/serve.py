@@ -34,9 +34,9 @@ def get_modelo():
 
 
 def get_umbral() -> float:
-    """Umbral de decisión: el optimizado por costo de negocio en el último
-    entrenamiento (guardado por seleccionar_mejor_modelo en threshold_path),
-    o el default de settings si todavía no se corrió ese paso.
+    """Umbral de decisión: el optimizado por costo de negocio del último
+    modelo promovido a producción (guardado por promover_a_produccion en
+    threshold_path), o el default de settings si todavía no se aprobó nada.
     """
     global _umbral
     if _umbral is None:

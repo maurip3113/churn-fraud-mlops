@@ -58,6 +58,29 @@ def detectar_drift(df_train: pd.DataFrame, df_nuevo: pd.DataFrame) -> list[dict]
     return resultados
 
 
+def evaluar_necesidad_reentrenamiento(resultados: list[dict]) -> dict:
+    """Decide si el drift detectado amerita reentrenar automáticamente.
+
+    Se dispara por FRACCIÓN de features con drift, no por "alguna feature
+    tiene drift" — con datos reales casi siempre hay alguna señal de cambio
+    en algo, y reentrenar en cada corrida de monitor.py sería ruidoso e
+    inútil. El umbral (settings.drift_retrain_fraction_threshold) es la
+    perilla que separa "ruido normal" de "la población realmente cambió".
+    """
+    total = len(resultados)
+    con_drift = sum(1 for r in resultados if r["drift_detectado"])
+    fraccion = con_drift / total if total else 0.0
+    umbral = settings.drift_retrain_fraction_threshold
+
+    return {
+        "features_con_drift": con_drift,
+        "features_totales": total,
+        "fraccion_drift": round(fraccion, 3),
+        "umbral": umbral,
+        "debe_reentrenar": fraccion >= umbral,
+    }
+
+
 def generar_reporte_llm(resultados: list[dict]) -> str:
     """Usa Claude para redactar un resumen ejecutivo del drift detectado."""
     resumen_datos = "\n".join(

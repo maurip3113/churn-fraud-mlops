@@ -23,10 +23,19 @@ class Settings(BaseSettings):
     raw_dataset_path: Path = ROOT_DIR / "data" / "telco_churn_raw.csv"
     model_path: Path = ROOT_DIR / "models" / "modelo_actual.pkl"
     threshold_path: Path = ROOT_DIR / "models" / "umbral.json"
+    pending_candidate_path: Path = ROOT_DIR / "models" / "candidato_pendiente.json"
     train_stats_path: Path = ROOT_DIR / "data" / "estadisticas_entrenamiento.csv"
 
     mlflow_experiment_name: str = "churn_prediction"
     drift_p_value_threshold: float = 0.05
+
+    # Si esta fracción (o más) de las features monitoreadas muestra drift,
+    # monitor.py dispara un reentrenamiento automático incorporando la
+    # cohorte de monitoreo (que ya tiene el churn real conocido) al set de
+    # entrenamiento. Con datasets reales casi siempre hay ALGO de drift en
+    # alguna feature — por eso el umbral es una fracción del total, no
+    # "cualquier feature con drift ya alcanza".
+    drift_retrain_fraction_threshold: float = 0.5
 
     # Métrica usada para elegir automáticamente el mejor modelo entre runs.
     # Se prioriza recall: en churn, un falso negativo (cliente que se va y no
