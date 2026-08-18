@@ -34,10 +34,15 @@ NUM_FEATURES = [
     "veces_tarjeta_hoy",
     "dias_desde_ultima_transaccion",
 ]
-CAT_FEATURES = ["es_extranjero", "es_online"]
+CAT_FEATURES = ["es_extranjero"]
 TARGET = "es_fraude"
 
-N_TRANSACCIONES = 20000
+# es_online NO es una feature del modelo: como separar_train_monitor() la usa
+# como criterio de corte (monitor = online, train = pos/atm), sería constante
+# dentro del set de entrenamiento (siempre 0) y el modelo no podría aprender
+# nada de ella — queda solo como columna interna para armar el split.
+
+N_TRANSACCIONES = 100000
 SEMILLA = 7
 
 
@@ -61,14 +66,14 @@ def asegurar_datos_crudos(path: Path, n: int = N_TRANSACCIONES, seed: int = SEMI
     monto = (monto_base * np.where(es_online == 1, 1.6, 1.0)).clip(1, 5000)
 
     logit_fraude = (
-        -6.2
+        -5.0
         + 0.0009 * monto
         + 0.03 * distancia
         + 1.8 * es_extranjero
         + 0.9 * es_online
         + 0.4 * (hora < 5).astype(float)
         - 0.15 * dias_desde_ultima
-        + rng.normal(0, 0.3, n)
+        + rng.normal(0, 0.2, n)
     )
     prob_fraude = 1 / (1 + np.exp(-logit_fraude))
     es_fraude = (rng.random(n) < prob_fraude).astype(int)
@@ -113,7 +118,6 @@ class Transaccion(BaseModel):
     veces_tarjeta_hoy: int
     dias_desde_ultima_transaccion: float
     es_extranjero: Literal[0, 1]
-    es_online: Literal[0, 1]
 
 
 USECASE = UseCase(

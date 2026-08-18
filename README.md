@@ -60,8 +60,8 @@ serve.py (raíz)
 
 | | **churn** | **fraude** |
 |---|---|---|
-| Dataset | [IBM Telco Customer Churn](https://raw.githubusercontent.com/IBM/telco-customer-churn-on-icp4d/master/data/Telco-Customer-Churn.csv), real, ~7000 filas | Sintético, generado por `asegurar_datos_crudos()`, 20000 filas |
-| Desbalance | ~20% positivo | ~0.5% positivo (fraude real es así de raro) |
+| Dataset | [IBM Telco Customer Churn](https://raw.githubusercontent.com/IBM/telco-customer-churn-on-icp4d/master/data/Telco-Customer-Churn.csv), real, ~7000 filas | Sintético, generado por `asegurar_datos_crudos()`, 100000 filas |
+| Desbalance | ~20% positivo | ~1.8% positivo (fraude real es así de raro) |
 | Cohorte de monitoreo | Clientes con `tenure <= 6` meses | Transacciones por canal `online` |
 | Asimetría de costo | Falso negativo 5x más caro | Falso negativo 20x más caro |
 
@@ -71,8 +71,19 @@ cuenta), así que `fraude` genera uno sintético — documentado como tal en
 ese plugin no es la fidelidad del dataset: es probar que el motor
 funciona igual de bien con un caso de uso genuinamente distinto a churn
 (desbalance extremo, costos invertidos, drift por canal en vez de por
-antigüedad). Con tan pocos positivos, el modelo resultante es débil
-(recall ~0.37) — es una limitación real de los datos, no del motor.
+antigüedad).
+
+**Bug real que encontramos probando la API**: al principio `es_online`
+estaba en `CAT_FEATURES` del modelo, pero como `separar_train_monitor()`
+la usa como criterio de corte (monitor = canal online, train = el resto),
+esa columna queda **constante** dentro del set de entrenamiento — el
+modelo nunca pudo aprender nada de ella (`feature_importance = 0`), y las
+predicciones eran casi idénticas sin importar el perfil de riesgo. Se
+sacó de las features del modelo (queda solo como criterio interno del
+split); con eso y más volumen de datos (100k filas, ~1200 positivos en
+training vs. los 42 originales), el recall subió de 0.37 a ~0.52 y las
+probabilidades ahora discriminan de verdad entre transacciones normales
+(~0.35) y de alto riesgo (~0.63).
 
 ## Qué haría un modelo de estos en producción
 

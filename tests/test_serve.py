@@ -118,7 +118,6 @@ def test_build_app_funciona_con_otro_usecase(fraude_usecase, df_fraude_fake, tmp
         "veces_tarjeta_hoy": 4,
         "dias_desde_ultima_transaccion": 0.5,
         "es_extranjero": 1,
-        "es_online": 1,
     }
 
     resp = client.post("/predict", json=transaccion)
