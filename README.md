@@ -97,6 +97,24 @@ O cambiar el criterio (por ejemplo, priorizar F1 en vez de recall):
 python -c "from churn_mlops.train import seleccionar_mejor_modelo; print(seleccionar_mejor_modelo(metric='f1_score'))"
 ```
 
+### Umbral de decisión ajustable por costo de negocio
+
+`serve.py` no usa `probabilidad > 0.5` a secas: usa el umbral que minimiza
+el costo esperado, calculado en `entrenar()` con `optimizar_umbral()`
+(barrido de umbrales evaluando `falsos_negativos * costo_falso_negativo +
+falsos_positivos * costo_falso_positivo`). Los costos son configurables en
+`settings` (`costo_falso_negativo=5.0`, `costo_falso_positivo=1.0` por
+default: perder un cliente sale ~5 veces más caro que una promo de
+retención de más).
+
+Ese umbral óptimo se loguea como parámetro de cada run en MLflow, y
+`seleccionar_mejor_modelo()` lo persiste en `models/umbral.json` junto con
+el modelo campeón — `serve.py` lo carga en el arranque (`GET /health` lo
+expone como `umbral_decision`, y cada respuesta de `POST /predict` incluye
+`umbral_usado`). Si no existe ese archivo (por ejemplo, antes del primer
+`train.py`), cae al default de `settings.prediction_threshold_default`
+(0.5).
+
 ### Tests y lint
 
 ```bash

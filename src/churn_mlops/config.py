@@ -22,6 +22,7 @@ class Settings(BaseSettings):
 
     raw_dataset_path: Path = ROOT_DIR / "data" / "telco_churn_raw.csv"
     model_path: Path = ROOT_DIR / "models" / "modelo_actual.pkl"
+    threshold_path: Path = ROOT_DIR / "models" / "umbral.json"
     train_stats_path: Path = ROOT_DIR / "data" / "estadisticas_entrenamiento.csv"
 
     mlflow_experiment_name: str = "churn_prediction"
@@ -39,6 +40,18 @@ class Settings(BaseSettings):
     # tenure <= este valor (meses) se separan del set de entrenamiento y se
     # tratan como la población entrante más reciente.
     monitor_tenure_cutoff_months: int = 6
+
+    # Umbral de decisión usado por serve.py si no hay un umbral optimizado
+    # guardado en threshold_path (por ejemplo, la primera vez que se corre).
+    prediction_threshold_default: float = 0.5
+
+    # Costos relativos usados para elegir el umbral óptimo en train.py: un
+    # falso negativo (cliente que se va y el modelo no lo detecta) le cuesta
+    # al negocio 5 veces más que un falso positivo (ofrecer una promo de
+    # retención a alguien que igual se iba a quedar). Ajustar según el costo
+    # real de la campaña de retención vs. el valor de vida del cliente.
+    costo_falso_negativo: float = 5.0
+    costo_falso_positivo: float = 1.0
 
 
 settings = Settings()

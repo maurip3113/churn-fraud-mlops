@@ -1,5 +1,6 @@
 """API de predicción de churn, servida sobre el pipeline entrenado (sklearn)."""
 
+import json
 import logging
 from typing import Literal
 
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Churn Prediction API")
 
 _modelo = None
+_umbral = None
 
 
 def get_modelo():
@@ -29,6 +31,24 @@ def get_modelo():
         _modelo = joblib.load(settings.model_path)
         logger.info("Modelo cargado desde %s", settings.model_path)
     return _modelo
+
+
+def get_umbral() -> float:
+    """Umbral de decisión: el optimizado por costo de negocio en el último
+    entrenamiento (guardado por seleccionar_mejor_modelo en threshold_path),
+    o el default de settings si todavía no se corrió ese paso.
+    """
+    global _umbral
+    if _umbral is None:
+        if settings.threshold_path.exists():
+            _umbral = json.loads(settings.threshold_path.read_text())["umbral"]
+            logger.info(
+                "Umbral de decisión cargado desde %s: %.2f", settings.threshold_path, _umbral
+            )
+        else:
+            _umbral = settings.prediction_threshold_default
+            logger.info("Sin umbral optimizado guardado, usando default: %.2f", _umbral)
+    return _umbral
 
 
 SiNo = Literal["Yes", "No"]
@@ -66,18 +86,24 @@ def home():
 @app.get("/health")
 def health():
     existe = settings.model_path.exists()
-    return {"status": "ok" if existe else "modelo_faltante", "model_path": str(settings.model_path)}
+    return {
+        "status": "ok" if existe else "modelo_faltante",
+        "model_path": str(settings.model_path),
+        "umbral_decision": get_umbral(),
+    }
 
 
 @app.post("/predict")
 def predecir(cliente: Cliente):
     modelo = get_modelo()
+    umbral = get_umbral()
     datos = pd.DataFrame([cliente.model_dump()])[FEATURES]
 
     probabilidad = modelo.predict_proba(datos)[0][1]
-    prediccion = int(probabilidad > 0.5)
+    prediccion = int(probabilidad > umbral)
 
     return {
         "va_a_abandonar": bool(prediccion),
         "probabilidad_churn": round(float(probabilidad), 3),
+        "umbral_usado": umbral,
     }

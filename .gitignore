@@ -12,6 +12,7 @@ mlruns/
 
 # modelo y datos derivados (se regeneran con prepare_data.py / train.py)
 models/*.pkl
+models/*.json
 data/telco_churn_raw.csv
 data/clientes_entrenamiento.csv
 data/clientes_nuevos.csv

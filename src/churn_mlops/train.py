@@ -6,16 +6,24 @@ versionado en MLflow y el .pkl para serving reciben directamente las
 columnas crudas del dataset — no hay lógica de features duplicada en serve.py.
 """
 
+import json
 import logging
 
 import joblib
 import mlflow
 import mlflow.sklearn
+import numpy as np
 import pandas as pd
 from mlflow.tracking import MlflowClient
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
@@ -40,6 +48,34 @@ def build_pipeline(n_estimators: int, max_depth: int) -> Pipeline:
         class_weight="balanced",  # el dataset real tiene ~20% de churn positivo
     )
     return Pipeline([("preprocesador", preprocesador), ("clasificador", clasificador)])
+
+
+def optimizar_umbral(
+    y_true, y_proba, costo_falso_negativo: float, costo_falso_positivo: float
+) -> dict:
+    """Busca, por grilla, el umbral de decisión que minimiza el costo de negocio.
+
+    costo_total(umbral) = falsos_negativos * costo_falso_negativo
+                         + falsos_positivos * costo_falso_positivo
+
+    Con costo_falso_negativo > costo_falso_positivo (el caso típico en
+    churn: perder un cliente sale más caro que una promo de retención de
+    más), el óptimo tiende a un umbral menor a 0.5 — el modelo se vuelve
+    más "alerta" a costa de más falsos positivos.
+    """
+    mejor = None
+    for umbral in np.linspace(0.05, 0.95, 91):
+        y_pred = (y_proba >= umbral).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+        costo_total = fn * costo_falso_negativo + fp * costo_falso_positivo
+        if mejor is None or costo_total < mejor["costo_total"]:
+            mejor = {
+                "umbral": round(float(umbral), 2),
+                "costo_total": float(costo_total),
+                "falsos_negativos": int(fn),
+                "falsos_positivos": int(fp),
+            }
+    return mejor
 
 
 def entrenar(df_train: pd.DataFrame, n_estimators: int = 100, max_depth: int = 6) -> dict:
@@ -67,6 +103,14 @@ def entrenar(df_train: pd.DataFrame, n_estimators: int = 100, max_depth: int = 6
         }
         for nombre, valor in metricas.items():
             mlflow.log_metric(nombre, valor)
+
+        y_proba = pipeline.predict_proba(X_test)[:, 1]
+        umbral_optimo = optimizar_umbral(
+            y_test, y_proba, settings.costo_falso_negativo, settings.costo_falso_positivo
+        )
+        mlflow.log_param("umbral_optimo", umbral_optimo["umbral"])
+        mlflow.log_metric("costo_total_test", umbral_optimo["costo_total"])
+        metricas["umbral_optimo"] = umbral_optimo["umbral"]
 
         mlflow.sklearn.log_model(
             pipeline,
@@ -153,10 +197,19 @@ def seleccionar_mejor_modelo(metric: str | None = None) -> dict:
     settings.models_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(modelo, settings.model_path)
 
+    umbral = float(
+        mejor_run.data.params.get("umbral_optimo", settings.prediction_threshold_default)
+    )
+    settings.threshold_path.write_text(
+        json.dumps(
+            {"umbral": umbral, "run_id": mejor_run.info.run_id, "run_name": mejor_run.info.run_name}
+        )
+    )
+
     logger.info(
-        "Modelo campeón: %s v%s (run '%s') copiado a %s",
+        "Modelo campeón: %s v%s (run '%s') copiado a %s | umbral de decisión: %.2f",
         settings.registered_model_name, version.version, mejor_run.info.run_name,
-        settings.model_path,
+        settings.model_path, umbral,
     )
 
     return {
@@ -165,4 +218,5 @@ def seleccionar_mejor_modelo(metric: str | None = None) -> dict:
         "version": version.version,
         "metric": metric,
         "metric_value": valor_metrica,
+        "umbral": umbral,
     }
