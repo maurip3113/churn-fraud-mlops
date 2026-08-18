@@ -29,7 +29,8 @@ src/churn_mlops/       paquete instalable (pip install -e .)
   logging_config.py       logging compartido
 
 prepare_data.py         entrypoint: genera los CSV de train/monitor
-train.py                entrypoint: corre los 3 experimentos y trackea en MLflow
+train.py                entrypoint: corre los 3 experimentos, trackea en MLflow
+                          y elige automáticamente el mejor modelo
 serve.py                entrypoint: expone `app` para uvicorn
 monitor.py              entrypoint: corre el test de drift + reporte
 
@@ -53,7 +54,8 @@ curl -o data/telco_churn_raw.csv \
 # 2. Preparar los datos (limpieza + split train/monitor)
 python prepare_data.py
 
-# 3. Entrenar (corre 3 experimentos con distintos hiperparámetros)
+# 3. Entrenar (corre 3 experimentos con distintos hiperparámetros y elige
+#    automáticamente el mejor modelo — ver sección de abajo)
 python train.py
 
 # 4. Ver los experimentos comparados visualmente
@@ -72,6 +74,28 @@ python monitor.py
 
 **Nunca hardcodees la API key en el README ni en ningún archivo versionado**
 — va en `.env` (que está en `.gitignore`) o como variable de entorno.
+
+### Selección automática del mejor modelo
+
+Al final de `train.py`, `seleccionar_mejor_modelo()` recorre **todos los runs
+históricos** del experimento en MLflow (no solo los 3 que se acaban de
+correr), elige el que mejor puntúa en `settings.model_selection_metric`
+(default: **recall** — en churn, un falso negativo cuesta más que un falso
+positivo, ver discusión en el código de `config.py`), lo promueve a alias
+`"champion"` en el Model Registry, y copia ese modelo a
+`models/modelo_actual.pkl` para que `serve.py` lo sirva.
+
+Se puede correr por separado en cualquier momento, sin reentrenar:
+
+```bash
+python -c "from churn_mlops.train import seleccionar_mejor_modelo; print(seleccionar_mejor_modelo())"
+```
+
+O cambiar el criterio (por ejemplo, priorizar F1 en vez de recall):
+
+```bash
+python -c "from churn_mlops.train import seleccionar_mejor_modelo; print(seleccionar_mejor_modelo(metric='f1_score'))"
+```
 
 ### Tests y lint
 

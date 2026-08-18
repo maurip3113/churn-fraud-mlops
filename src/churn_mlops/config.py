@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     mlflow_experiment_name: str = "churn_prediction"
     drift_p_value_threshold: float = 0.05
 
+    # Métrica usada para elegir automáticamente el mejor modelo entre runs.
+    # Se prioriza recall: en churn, un falso negativo (cliente que se va y no
+    # lo detectamos) cuesta más que un falso positivo (oferta de retención
+    # de más a alguien que igual se quedaba).
+    model_selection_metric: str = "recall"
+    registered_model_name: str = "churn_predictor"
+    champion_alias: str = "champion"
+
     # Cohorte usada para simular un batch "nuevo" a monitorear: clientes con
     # tenure <= este valor (meses) se separan del set de entrenamiento y se
     # tratan como la población entrante más reciente.
