@@ -2,7 +2,7 @@ import joblib
 import pytest
 from fastapi.testclient import TestClient
 
-from churn_mlops.data import FEATURES, TARGET
+from churn_mlops.serve import build_app
 from churn_mlops.train import build_pipeline
 
 CLIENTE_VALIDO = {
@@ -29,29 +29,32 @@ CLIENTE_VALIDO = {
 
 
 @pytest.fixture
-def client_con_modelo(df_train_fake, tmp_path, monkeypatch):
+def entorno_modelo(churn_usecase, df_train_fake, tmp_path, monkeypatch):
+    """Entrena un modelo chico y lo deja donde settings.model_path() lo espera,
+    con threshold_path inexistente a propósito (para probar el default)."""
     from churn_mlops.config import settings
 
-    pipeline = build_pipeline(n_estimators=10, max_depth=3)
-    pipeline.fit(df_train_fake[FEATURES], df_train_fake[TARGET])
-    model_path = tmp_path / "modelo.pkl"
-    joblib.dump(pipeline, model_path)
-    monkeypatch.setattr(settings, "model_path", model_path)
-    # threshold_path inexistente a propósito: get_umbral() debe caer al default
-    monkeypatch.setattr(settings, "threshold_path", tmp_path / "no_existe.json")
+    monkeypatch.setattr(settings, "models_dir", tmp_path / "models")
 
-    import churn_mlops.serve as serve_module
+    pipeline = build_pipeline(churn_usecase, n_estimators=10, max_depth=3)
+    pipeline.fit(df_train_fake[churn_usecase.features], df_train_fake[churn_usecase.target])
+    ruta_modelo = settings.model_path(churn_usecase.name)
+    ruta_modelo.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(pipeline, ruta_modelo)
 
-    monkeypatch.setattr(serve_module, "_modelo", None)
-    monkeypatch.setattr(serve_module, "_umbral", None)
+    return settings
 
-    return TestClient(serve_module.app)
+
+@pytest.fixture
+def client_con_modelo(churn_usecase, entorno_modelo):
+    return TestClient(build_app(churn_usecase))
 
 
 def test_home_ok(client_con_modelo):
     resp = client_con_modelo.get("/")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+    assert resp.json()["usecase"] == "churn"
 
 
 def test_predict_devuelve_probabilidad(client_con_modelo):
@@ -59,8 +62,8 @@ def test_predict_devuelve_probabilidad(client_con_modelo):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert "va_a_abandonar" in body
-    assert 0.0 <= body["probabilidad_churn"] <= 1.0
+    assert "positivo" in body
+    assert 0.0 <= body["probabilidad"] <= 1.0
 
 
 def test_predict_rechaza_valor_invalido(client_con_modelo):
@@ -76,34 +79,49 @@ def test_health_reporta_modelo_presente(client_con_modelo):
     assert resp.json()["status"] == "ok"
 
 
-def test_predict_usa_umbral_default_sin_archivo_guardado(client_con_modelo):
-    from churn_mlops.config import settings
-
+def test_predict_usa_umbral_default_sin_archivo_guardado(client_con_modelo, entorno_modelo):
     resp = client_con_modelo.post("/predict", json=CLIENTE_VALIDO)
 
-    assert resp.json()["umbral_usado"] == settings.prediction_threshold_default
+    assert resp.json()["umbral_usado"] == entorno_modelo.prediction_threshold_default
 
 
-def test_predict_usa_umbral_guardado_en_threshold_path(df_train_fake, tmp_path, monkeypatch):
+def test_predict_usa_umbral_guardado_en_threshold_path(churn_usecase, entorno_modelo):
     import json
 
-    from churn_mlops.config import settings
-
-    pipeline = build_pipeline(n_estimators=10, max_depth=3)
-    pipeline.fit(df_train_fake[FEATURES], df_train_fake[TARGET])
-    joblib.dump(pipeline, tmp_path / "modelo.pkl")
-    monkeypatch.setattr(settings, "model_path", tmp_path / "modelo.pkl")
-
-    threshold_path = tmp_path / "umbral.json"
-    threshold_path.write_text(json.dumps({"umbral": 0.2, "run_id": "x", "run_name": "y"}))
-    monkeypatch.setattr(settings, "threshold_path", threshold_path)
-
-    import churn_mlops.serve as serve_module
-
-    monkeypatch.setattr(serve_module, "_modelo", None)
-    monkeypatch.setattr(serve_module, "_umbral", None)
-    client = TestClient(serve_module.app)
+    entorno_modelo.threshold_path(churn_usecase.name).write_text(
+        json.dumps({"umbral": 0.2, "run_id": "x", "run_name": "y"})
+    )
+    client = TestClient(build_app(churn_usecase))
 
     resp = client.post("/predict", json=CLIENTE_VALIDO)
 
     assert resp.json()["umbral_usado"] == 0.2
+
+
+def test_build_app_funciona_con_otro_usecase(fraude_usecase, df_fraude_fake, tmp_path, monkeypatch):
+    """Prueba de genericidad: build_app no debería tener nada hardcodeado de churn."""
+    from churn_mlops.config import settings
+
+    monkeypatch.setattr(settings, "models_dir", tmp_path / "models")
+
+    pipeline = build_pipeline(fraude_usecase, n_estimators=10, max_depth=3)
+    pipeline.fit(df_fraude_fake[fraude_usecase.features], df_fraude_fake[fraude_usecase.target])
+    ruta_modelo = settings.model_path(fraude_usecase.name)
+    ruta_modelo.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(pipeline, ruta_modelo)
+
+    client = TestClient(build_app(fraude_usecase))
+    transaccion = {
+        "monto": 120.5,
+        "hora_del_dia": 3,
+        "distancia_a_casa_km": 80.0,
+        "veces_tarjeta_hoy": 4,
+        "dias_desde_ultima_transaccion": 0.5,
+        "es_extranjero": 1,
+        "es_online": 1,
+    }
+
+    resp = client.post("/predict", json=transaccion)
+
+    assert resp.status_code == 200
+    assert 0.0 <= resp.json()["probabilidad"] <= 1.0

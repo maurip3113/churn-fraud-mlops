@@ -1,4 +1,10 @@
-"""Configuración centralizada del proyecto, leída de variables de entorno / .env."""
+"""Configuración centralizada del proyecto, leída de variables de entorno / .env.
+
+Los paths son métodos parametrizados por nombre de caso de uso (no campos
+fijos): cada plugin (churn, fraude, ...) tiene su propia subcarpeta bajo
+data/ y models/, y su propio experimento de MLflow — nunca comparten
+artefactos entre sí.
+"""
 
 from pathlib import Path
 
@@ -14,6 +20,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # Caso de uso activo por default para los entrypoints que no reciben
+    # --usecase explícito (por ejemplo serve.py, que uvicorn importa
+    # directamente sin poder pasarle argumentos de línea de comandos).
+    usecase: str = "churn"
+
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-sonnet-4-6"
 
@@ -27,47 +38,46 @@ class Settings(BaseSettings):
     data_dir: Path = ROOT_DIR / "data"
     models_dir: Path = ROOT_DIR / "models"
 
-    raw_dataset_path: Path = ROOT_DIR / "data" / "telco_churn_raw.csv"
-    model_path: Path = ROOT_DIR / "models" / "modelo_actual.pkl"
-    threshold_path: Path = ROOT_DIR / "models" / "umbral.json"
-    pending_candidate_path: Path = ROOT_DIR / "models" / "candidato_pendiente.json"
-    train_stats_path: Path = ROOT_DIR / "data" / "estadisticas_entrenamiento.csv"
-
-    mlflow_experiment_name: str = "churn_prediction"
     drift_p_value_threshold: float = 0.05
 
     # Si esta fracción (o más) de las features monitoreadas muestra drift,
     # monitor.py dispara un reentrenamiento automático incorporando la
-    # cohorte de monitoreo (que ya tiene el churn real conocido) al set de
-    # entrenamiento. Con datasets reales casi siempre hay ALGO de drift en
-    # alguna feature — por eso el umbral es una fracción del total, no
+    # cohorte de monitoreo (que ya tiene el resultado real conocido) al set
+    # de entrenamiento. Con datasets reales casi siempre hay ALGO de drift
+    # en alguna feature — por eso el umbral es una fracción del total, no
     # "cualquier feature con drift ya alcanza".
     drift_retrain_fraction_threshold: float = 0.5
 
     # Métrica usada para elegir automáticamente el mejor modelo entre runs.
-    # Se prioriza recall: en churn, un falso negativo (cliente que se va y no
-    # lo detectamos) cuesta más que un falso positivo (oferta de retención
-    # de más a alguien que igual se quedaba).
+    # Se prioriza recall: en los dos casos de uso actuales (churn, fraude),
+    # un falso negativo cuesta más que un falso positivo.
     model_selection_metric: str = "recall"
-    registered_model_name: str = "churn_predictor"
     champion_alias: str = "champion"
 
-    # Cohorte usada para simular un batch "nuevo" a monitorear: clientes con
-    # tenure <= este valor (meses) se separan del set de entrenamiento y se
-    # tratan como la población entrante más reciente.
-    monitor_tenure_cutoff_months: int = 6
-
     # Umbral de decisión usado por serve.py si no hay un umbral optimizado
-    # guardado en threshold_path (por ejemplo, la primera vez que se corre).
+    # guardado (por ejemplo, antes de la primera aprobación).
     prediction_threshold_default: float = 0.5
 
-    # Costos relativos usados para elegir el umbral óptimo en train.py: un
-    # falso negativo (cliente que se va y el modelo no lo detecta) le cuesta
-    # al negocio 5 veces más que un falso positivo (ofrecer una promo de
-    # retención a alguien que igual se iba a quedar). Ajustar según el costo
-    # real de la campaña de retención vs. el valor de vida del cliente.
-    costo_falso_negativo: float = 5.0
-    costo_falso_positivo: float = 1.0
+    def raw_dataset_path(self, usecase: str) -> Path:
+        return self.data_dir / usecase / "datos_crudos.csv"
+
+    def train_csv_path(self, usecase: str) -> Path:
+        return self.data_dir / usecase / "entrenamiento.csv"
+
+    def monitor_csv_path(self, usecase: str) -> Path:
+        return self.data_dir / usecase / "monitoreo.csv"
+
+    def train_stats_path(self, usecase: str) -> Path:
+        return self.data_dir / usecase / "estadisticas_entrenamiento.csv"
+
+    def model_path(self, usecase: str) -> Path:
+        return self.models_dir / usecase / "modelo_actual.pkl"
+
+    def threshold_path(self, usecase: str) -> Path:
+        return self.models_dir / usecase / "umbral.json"
+
+    def pending_candidate_path(self, usecase: str) -> Path:
+        return self.models_dir / usecase / "candidato_pendiente.json"
 
 
 settings = Settings()

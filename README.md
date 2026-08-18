@@ -1,76 +1,101 @@
-# MLOps end-to-end: predicción de churn (Telco Customer Churn, IBM)
+# MLOps end-to-end multi-caso-de-uso (churn + fraude)
 
-Pipeline completo de ML en producción: datos reales, tracking de
-experimentos, model registry, serving vía API, monitoreo de drift,
-reentrenamiento automático y un gate humano de aprobación antes de tocar
-producción — con un reporte generado por un LLM en el medio.
+Motor genérico de ML en producción — tracking de experimentos, model
+registry, serving vía API, monitoreo de drift, reentrenamiento automático
+y un gate humano de aprobación antes de tocar producción, con un informe
+generado por un LLM — que sirve para **cualquier** problema de
+clasificación binaria enchufado como plugin. Vienen dos casos de uso ya
+armados: **churn** (abandono de clientes, dataset real) y **fraude**
+(detección de fraude en transacciones, dataset sintético).
 
-## Dataset
+## Arquitectura de plugins
 
-[IBM Telco Customer Churn](https://raw.githubusercontent.com/IBM/telco-customer-churn-on-icp4d/master/data/Telco-Customer-Churn.csv):
-~7000 clientes reales de una empresa de telecom, con 19 features (contrato,
-servicios contratados, forma de pago, gasto) y la variable objetivo `Churn`.
+El motor (`train.py`, `monitor.py`, `serve.py`, `informe.py` dentro de
+`src/churn_mlops/`) no sabe nada de columnas, targets ni costos de negocio
+concretos — todo eso vive en una instancia de `UseCase`
+([usecases/base.py](src/churn_mlops/usecases/base.py)) que cada plugin
+construye:
 
-El dataset es una foto estática sin columna de fecha, así que para el
-monitoreo de drift no se simula "el futuro" de forma artificial: se separa
-una cohorte real y con sentido de negocio — los clientes con `tenure <= 6`
-meses quedan afuera del entrenamiento y se usan como el "batch nuevo" a
-monitorear. Es el mismo tipo de comparación (clientes recién adquiridos vs.
-base histórica) que un equipo de MLOps haría en producción.
+```python
+@dataclass(frozen=True)
+class UseCase:
+    name: str                    # nombra el experimento de MLflow y las subcarpetas
+    num_features: list[str]
+    cat_features: list[str]
+    target: str
+    request_model: type[BaseModel]      # schema de POST /predict
+    costo_falso_negativo: float
+    costo_falso_positivo: float
+    asegurar_datos_crudos: Callable     # descarga o genera el CSV crudo
+    cargar_y_limpiar: Callable
+    separar_train_monitor: Callable     # cohorte de monitoreo con sentido de negocio
+```
 
-## Qué haría este modelo en producción
+Agregar un caso de uso nuevo: escribir un módulo en `usecases/` que arme
+uno de estos, y sumarlo a `usecases/registry.py`. El resto del pipeline
+—MLflow, selección de candidato, umbral por costo, gate de aprobación,
+detección de drift, informe con LLM— no cambia una línea.
 
-El modelo no "decide" nada por sí mismo — solo puntúa clientes. Lo que
-dispara una acción real es el sistema que lo consume:
+```
+src/churn_mlops/
+  usecases/
+    base.py       contrato UseCase
+    churn.py       plugin: abandono de clientes (IBM Telco, dataset real)
+    fraude.py      plugin: fraude en transacciones (dataset sintético)
+    registry.py    get_usecase(nombre)
+  config.py        settings + paths parametrizados por usecase
+  train.py         motor: pipeline sklearn + MLflow + candidato + promoción
+  serve.py         motor: build_app(usecase) → FastAPI
+  monitor.py       motor: drift (KS + chi-cuadrado) + reentrenamiento
+  informe.py       motor: informe descriptivo con LLM (Ollama/Claude)
+
+prepare_data.py / train.py / monitor.py / aprobar_modelo.py / generar_informe.py
+  entrypoints — todos aceptan --usecase churn|fraude
+serve.py (raíz)
+  entrypoint — uvicorn no acepta argparse, así que el usecase se elige con
+  la variable de entorno USECASE (default "churn")
+```
+
+## Los dos casos de uso
+
+| | **churn** | **fraude** |
+|---|---|---|
+| Dataset | [IBM Telco Customer Churn](https://raw.githubusercontent.com/IBM/telco-customer-churn-on-icp4d/master/data/Telco-Customer-Churn.csv), real, ~7000 filas | Sintético, generado por `asegurar_datos_crudos()`, 20000 filas |
+| Desbalance | ~20% positivo | ~0.5% positivo (fraude real es así de raro) |
+| Cohorte de monitoreo | Clientes con `tenure <= 6` meses | Transacciones por canal `online` |
+| Asimetría de costo | Falso negativo 5x más caro | Falso negativo 20x más caro |
+
+No hay un dataset público de fraude gratis sin login (los de Kaggle piden
+cuenta), así que `fraude` genera uno sintético — documentado como tal en
+[usecases/fraude.py](src/churn_mlops/usecases/fraude.py). El objetivo de
+ese plugin no es la fidelidad del dataset: es probar que el motor
+funciona igual de bien con un caso de uso genuinamente distinto a churn
+(desbalance extremo, costos invertidos, drift por canal en vez de por
+antigüedad). Con tan pocos positivos, el modelo resultante es débil
+(recall ~0.37) — es una limitación real de los datos, no del motor.
+
+## Qué haría un modelo de estos en producción
+
+El modelo no "decide" nada por sí mismo — solo puntúa. Lo que dispara una
+acción real es el sistema que lo consume:
 
 - **Scoring por lotes** (ej. cada noche): un job llama a `/predict` para
-  toda la base de clientes activos y guarda `probabilidad_churn` +
-  `va_a_abandonar` en un data warehouse.
-- **Scoring en tiempo real**: cuando cambia algo relevante del cliente
-  (deja de pagar, cierra un producto, llama mucho a soporte), el sistema
-  que dispara ese evento llama a `/predict` al vuelo.
-- **Downstream**: la lista de clientes con `va_a_abandonar=true` (según el
-  umbral optimizado, ver más abajo) alimenta al equipo de retención —
-  dispara una campaña automática (mail, descuento) o una alerta para que
-  un agente llame proactivamente.
+  toda la base activa y guarda `probabilidad` + `positivo` en un data
+  warehouse.
+- **Scoring en tiempo real**: cuando pasa algo relevante (un cliente deja
+  de pagar; una transacción se procesa), el sistema que dispara ese evento
+  llama a `/predict` al vuelo.
+- **Downstream**: la lista de casos con `positivo=true` (según el umbral
+  optimizado por costo) alimenta al equipo correspondiente — retención en
+  churn, revisión manual en fraude.
 
-El modelo nunca decide "retener" por sí mismo — decide a quién mirar
-primero. La política de negocio (a quién ofrecerle qué, con qué
-presupuesto) queda afuera del modelo, en reglas separadas. Justamente por
+El modelo nunca actúa por sí solo — decide a quién mirar primero. La
+política de negocio (a quién ofrecerle qué, a quién bloquearle una
+transacción) queda afuera del modelo, en reglas separadas. Justamente por
 eso importa el gate humano de aprobación: si el modelo alimenta decisiones
-reales de negocio (a quién ofrecerle descuentos; en un caso fintech, a
-quién ajustarle un límite de crédito), un cambio de modelo sin revisión
-puede alterar esas decisiones a gran escala de un día para el otro.
-
-## Estructura del proyecto
-
-```
-src/churn_mlops/       paquete instalable (pip install -e .)
-  config.py              settings tipadas, leídas de .env
-  data.py                carga, limpieza y split train/monitor
-  train.py                pipeline sklearn (ColumnTransformer + RandomForest) + MLflow
-                            + selección de candidato + promoción a producción
-  serve.py                lógica de la API FastAPI
-  monitor.py              detección de drift (KS + chi-cuadrado) + reporte LLM
-                            + diagnóstico de reentrenamiento
-  informe.py              informe descriptivo de todos los runs (Ollama/Claude)
-  logging_config.py       logging compartido
-
-prepare_data.py         entrypoint: genera los CSV de train/monitor
-train.py                entrypoint: corre los 3 experimentos, trackea en MLflow
-                          y deja el mejor candidato pendiente de aprobación
-monitor.py              entrypoint: corre el test de drift + reporte, y si el
-                          drift es significativo reentrena (también queda
-                          pendiente de aprobación, nunca se auto-promueve)
-aprobar_modelo.py       entrypoint: gate humano — revisa el candidato pendiente
-                          y, si se confirma, lo promueve a producción
-generar_informe.py      entrypoint: informe descriptivo de todos los experimentos
-serve.py                entrypoint: expone `app` para uvicorn
-
-tests/                  pytest (datos, drift, entrenamiento, API)
-Dockerfile              imagen para servir la API
-.github/workflows/ci.yml  lint (ruff) + tests en cada push/PR
-```
+reales (descuentos, límites de crédito, bloqueos de tarjeta), un cambio de
+modelo sin revisión puede alterar esas decisiones a gran escala de un día
+para el otro.
 
 ## Cómo correrlo, en orden
 
@@ -80,33 +105,31 @@ pip install -r requirements-dev.txt   # runtime + pytest/ruff
 pip install -e .                      # instala el paquete churn_mlops
 cp .env.example .env                  # completá ANTHROPIC_API_KEY si la tenés
 
-# 1. Descargar el dataset real (una sola vez)
-curl -o data/telco_churn_raw.csv \
+# 1. Datos: para churn hay que traer el dataset real a mano (una sola vez);
+#    para fraude se genera solo, no hace falta este paso.
+curl -o data/churn/datos_crudos.csv \
   https://raw.githubusercontent.com/IBM/telco-customer-churn-on-icp4d/master/data/Telco-Customer-Churn.csv
 
 # 2. Preparar los datos (limpieza + split train/monitor)
-python prepare_data.py
+python prepare_data.py --usecase churn      # o --usecase fraude
 
-# 3. Entrenar (corre 3 experimentos con distintos hiperparámetros y deja el
-#    mejor candidato pendiente de aprobación — ver sección de abajo)
-python train.py
+# 3. Entrenar (corre 3 experimentos y deja el mejor candidato pendiente)
+python train.py --usecase churn
 
 # 4. Ver los experimentos comparados visualmente
 mlflow ui
 # abrir http://localhost:5000
 
 # 5. Revisar y aprobar el candidato (gate humano, ver sección de abajo)
-python aprobar_modelo.py
+python aprobar_modelo.py --usecase churn
 
 # 6. Levantar la API de predicción
-uvicorn serve:app --reload
+uvicorn serve:app --reload                    # sirve settings.usecase (default "churn")
+USECASE=fraude uvicorn serve:app --port 8001  # o levantar fraude en otro puerto
 # abrir http://localhost:8000/docs
 
-# 7. Correr el monitoreo de drift (necesita ANTHROPIC_API_KEY en .env para
-#    el reporte en lenguaje natural; sin ella igual muestra los resultados
-#    numéricos de los tests estadísticos). Si el drift es significativo,
-#    reentrena y deja otro candidato pendiente — repetir el paso 5.
-python monitor.py
+# 7. Monitoreo de drift + reentrenamiento automático si hace falta
+python monitor.py --usecase churn
 ```
 
 **Nunca hardcodees la API key en el README ni en ningún archivo versionado**
@@ -115,51 +138,38 @@ python monitor.py
 ### Selección de candidato + gate humano de aprobación
 
 `train.py` corre los 3 experimentos y, al final, `identificar_mejor_candidato()`
-recorre **todos los runs históricos** del experimento en MLflow (no solo los
-3 que se acaban de correr), elige el que mejor puntúa en
-`settings.model_selection_metric` (default: **recall** — en churn, un falso
-negativo cuesta más que un falso positivo, ver discusión en el código de
-`config.py`), y lo deja anotado en `models/candidato_pendiente.json`.
+recorre **todos los runs históricos** del experimento de ese caso de uso en
+MLflow, elige el que mejor puntúa en `settings.model_selection_metric`
+(default: **recall**), y lo deja anotado en
+`models/<usecase>/candidato_pendiente.json`.
 
 **Ahí se frena.** Ni `train.py` ni `monitor.py` tocan el modelo que sirve
-`serve.py`, ni el alias `"champion"` del Model Registry — eso requiere
-correr explícitamente:
+la API, ni el alias `"champion"` del Model Registry — eso requiere correr
+explícitamente:
 
 ```bash
-python aprobar_modelo.py            # muestra el candidato y pide confirmación
-python aprobar_modelo.py --yes      # aprueba sin preguntar (uso en scripts/CI)
+python aprobar_modelo.py --usecase churn            # muestra el candidato y pide confirmación
+python aprobar_modelo.py --usecase churn --yes      # aprueba sin preguntar (uso en scripts/CI)
 ```
 
 Recién ahí `promover_a_produccion()` setea el alias `"champion"`, copia el
-modelo a `models/modelo_actual.pkl` y su umbral a `models/umbral.json` — lo
-que efectivamente sirve la API.
-
-Se puede correr la identificación de candidato por separado, sin reentrenar:
-
-```bash
-python -c "from churn_mlops.train import identificar_mejor_candidato; print(identificar_mejor_candidato())"
-```
-
-O cambiar el criterio (por ejemplo, priorizar F1 en vez de recall):
-
-```bash
-python -c "from churn_mlops.train import identificar_mejor_candidato; print(identificar_mejor_candidato(metric='f1_score'))"
-```
+modelo a `models/<usecase>/modelo_actual.pkl` y su umbral a
+`models/<usecase>/umbral.json` — lo que efectivamente sirve la API.
 
 ### Reentrenamiento automático por drift
 
-`monitor.py` compara la cohorte de clientes nuevos contra la base histórica
-y calcula la **fracción de features con drift**. Si supera
+`monitor.py` compara la cohorte reciente contra la base histórica y
+calcula la **fracción de features con drift**. Si supera
 `settings.drift_retrain_fraction_threshold` (default: 50%), dispara
 `reentrenar_con_datos_combinados()`: incorpora la cohorte de monitoreo (que
-ya tiene el churn real conocido, no es "el futuro" sin etiqueta) al set de
-entrenamiento, corre los 3 experimentos de nuevo, e identifica un candidato
-— que, igual que en `train.py`, **queda pendiente de aprobación**, nunca se
-promueve solo.
+ya tiene el resultado real conocido, no es "el futuro" sin etiqueta) al set
+de entrenamiento, corre los 3 experimentos de nuevo, e identifica un
+candidato — que, igual que en `train.py`, **queda pendiente de
+aprobación**, nunca se promueve solo.
 
 ```bash
-python monitor.py                 # reporta y reentrena si hace falta
-python monitor.py --no-retrain    # solo reporta, nunca reentrena
+python monitor.py --usecase churn                  # reporta y reentrena si hace falta
+python monitor.py --usecase churn --no-retrain     # solo reporta, nunca reentrena
 ```
 
 El umbral de fracción es una perilla a propósito: con datos reales casi
@@ -172,25 +182,24 @@ porción sustancial de la población.
 `serve.py` no usa `probabilidad > 0.5` a secas: usa el umbral que minimiza
 el costo esperado, calculado en `entrenar()` con `optimizar_umbral()`
 (barrido de umbrales evaluando `falsos_negativos * costo_falso_negativo +
-falsos_positivos * costo_falso_positivo`). Los costos son configurables en
-`settings` (`costo_falso_negativo=5.0`, `costo_falso_positivo=1.0` por
-default: perder un cliente sale ~5 veces más caro que una promo de
-retención de más).
+falsos_positivos * costo_falso_positivo`). Los costos son propios de cada
+`UseCase` — en churn, un falso negativo sale ~5x más caro que uno
+positivo; en fraude, ~20x, porque no detectar un fraude es mucho más grave
+que bloquear por error una transacción legítima.
 
 Ese umbral óptimo se loguea como parámetro de cada run en MLflow, viaja con
-el candidato, y `promover_a_produccion()` lo persiste en `models/umbral.json`
-junto con el modelo aprobado — `serve.py` lo carga en el arranque
-(`GET /health` lo expone como `umbral_decision`, y cada respuesta de
-`POST /predict` incluye `umbral_usado`). Si no existe ese archivo (por
-ejemplo, antes de la primera aprobación), cae al default de
-`settings.prediction_threshold_default` (0.5).
+el candidato, y `promover_a_produccion()` lo persiste junto con el modelo
+aprobado — la API lo carga en el arranque (`GET /health` lo expone como
+`umbral_decision`, y cada respuesta de `POST /predict` incluye
+`umbral_usado`). Si no existe ese archivo (antes de la primera aprobación),
+cae al default de `settings.prediction_threshold_default` (0.5).
 
 ### Informe descriptivo de todos los experimentos
 
 `generar_informe.py` junta hiperparámetros y métricas de **todos los runs
-históricos** del experimento en MLflow y le pide a un LLM que redacte un
-análisis: qué se probó, qué configuración rindió mejor y por qué,
-tendencias (over/underfitting), y una conclusión.
+históricos** del experimento de un caso de uso y le pide a un LLM que
+redacte un análisis: qué se probó, qué configuración rindió mejor y por
+qué, tendencias (over/underfitting), y una conclusión.
 
 Por default usa **Ollama local** (`settings.llm_provider = "ollama"`) —
 gratis, sin API key, sin depender de crédito de ningún proveedor:
@@ -200,7 +209,7 @@ gratis, sin API key, sin depender de crédito de ningún proveedor:
 # 2. Bajar un modelo chico (una sola vez)
 ollama pull llama3.2
 # 3. Generar el informe
-python generar_informe.py
+python generar_informe.py --usecase churn
 ```
 
 Para usar Claude en cambio (mejor calidad de análisis, pero requiere
@@ -211,13 +220,12 @@ LLM_PROVIDER=anthropic
 ```
 
 **Limitación conocida**: `llama3.2` (3B parámetros) es liviano y corre en
-cualquier PC, pero razona peor sobre tablas numéricas que un modelo grande
-— en una prueba real llegó a señalar como "mejor en recall" un run que no
-tenía el recall más alto de la tabla, y confundió `accuracy` con
-`precision` en la traducción. Sirve para un borrador rápido y gratis; para
-un informe que se vaya a usar en una decisión real, conviene revisar los
-números contra la tabla (que sí es exacta, generada directamente desde
-MLflow) o usar Claude.
+cualquier PC, pero razona peor sobre tablas numéricas que un modelo
+grande — en pruebas reales (tanto en churn como en fraude) llegó a señalar
+como "mejor en recall" un run que no tenía el recall más alto de la tabla.
+Sirve para un borrador rápido y gratis; para un informe que se vaya a usar
+en una decisión real, conviene revisar los números contra la tabla (que sí
+es exacta, generada directamente desde MLflow) o usar Claude.
 
 ### Tests y lint
 
@@ -226,6 +234,10 @@ pytest -v
 ruff check .
 ```
 
+Los tests cubren el motor genérico con `churn_usecase` y, en varios casos,
+también con `fraude_usecase` — para verificar que el motor no tiene nada
+hardcodeado de un caso de uso en particular.
+
 ### Docker
 
 ```bash
@@ -233,13 +245,17 @@ docker build -t churn-api .
 docker run -p 8000:8000 churn-api
 ```
 
-Requiere que `models/modelo_actual.pkl` ya exista — correr `train.py` +
-`aprobar_modelo.py` antes del build.
+Requiere que `models/churn/modelo_actual.pkl` ya exista — correr `train.py`
++ `aprobar_modelo.py` antes del build. (El Dockerfile sirve `churn` por
+default; para `fraude` habría que parametrizar la imagen con `USECASE`.)
 
 ## Qué conecta con cada materia
 - **MLOps**: todo el pipeline (tracking, registry, serving, monitoreo,
-  reentrenamiento automático, gate de aprobación, CI, containerización)
-- **Big Data**: si el dataset fuera masivo, `prepare_data.py` se reemplazaría
-  por un preprocesamiento en Spark antes de entrenar
-- **LLMs**: `monitor.py` usa Claude para redactar el reporte de drift en
-  lenguaje natural, a partir del contexto numérico de los tests estadísticos
+  reentrenamiento automático, gate de aprobación, CI, containerización) —
+  y la arquitectura de plugins que lo hace reusable entre casos de uso
+- **Big Data**: si un dataset fuera masivo, `asegurar_datos_crudos()` de
+  ese plugin se reemplazaría por un preprocesamiento en Spark antes de
+  entrenar
+- **LLMs**: `monitor.py` usa Claude para redactar el reporte de drift, y
+  `generar_informe.py` usa Ollama (o Claude) para el informe descriptivo
+  de experimentos

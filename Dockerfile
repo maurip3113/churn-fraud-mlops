@@ -1,6 +1,8 @@
-# Imagen para servir la API de predicción de churn.
-# Requiere que exista models/modelo_actual.pkl (entrenado con train.py) — no
-# se entrena dentro del build, se monta o se copia el artefacto ya generado.
+# Imagen para servir la API de predicción. Sirve el caso de uso "churn" por
+# default (ver USECASE en serve.py) — requiere que exista
+# models/churn/modelo_actual.pkl (train.py + aprobar_modelo.py) antes del
+# build; no se entrena dentro de la imagen, se copia el artefacto ya
+# aprobado. Para otro caso de uso: -e USECASE=fraude al correr el container.
 FROM python:3.12-slim
 
 WORKDIR /app

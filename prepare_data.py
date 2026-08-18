@@ -1,36 +1,54 @@
 """
-PASO 1: Preparación del dataset real (IBM Telco Customer Churn).
+PASO 1: Preparación de datos para un caso de uso.
 
-Lee data/telco_churn_raw.csv, lo limpia y lo separa en:
-- data/clientes_entrenamiento.csv: base histórica usada para entrenar
-- data/clientes_nuevos.csv: cohorte de clientes recientes (tenure baja),
-  usada más adelante por monitor.py para detectar drift real
+Para "churn" (dataset real), asegurar_datos_crudos() valida que ya hayas
+descargado el CSV a mano (ver README). Para "fraude" (dataset sintético),
+lo genera automáticamente si no existe.
+
+Separa el CSV crudo en:
+- data/<usecase>/entrenamiento.csv: base histórica usada para entrenar
+- data/<usecase>/monitoreo.csv: cohorte reciente, usada por monitor.py
+
+CÓMO CORRERLO
+-------------
+python prepare_data.py --usecase churn
+python prepare_data.py --usecase fraude
 """
 
+import argparse
 import logging
 
 from churn_mlops.config import settings
-from churn_mlops.data import prepare_datasets
 from churn_mlops.logging_config import setup_logging
+from churn_mlops.usecases.registry import USECASES, get_usecase
 
 logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--usecase", default="churn", choices=sorted(USECASES))
+    args = parser.parse_args()
+
     setup_logging()
+    usecase = get_usecase(args.usecase)
 
-    if not settings.raw_dataset_path.exists():
-        raise SystemExit(
-            f"No se encontró {settings.raw_dataset_path}. "
-            "Descargá el dataset Telco Customer Churn (IBM) antes de continuar."
-        )
+    ruta_cruda = settings.raw_dataset_path(usecase.name)
+    ruta_cruda.parent.mkdir(parents=True, exist_ok=True)
+    usecase.asegurar_datos_crudos(ruta_cruda)
 
-    df_train, df_nuevo = prepare_datasets()
+    df = usecase.cargar_y_limpiar(ruta_cruda)
+    df_train, df_nuevo = usecase.separar_train_monitor(df)
 
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-    df_train.to_csv(settings.data_dir / "clientes_entrenamiento.csv", index=False)
-    df_nuevo.to_csv(settings.data_dir / "clientes_nuevos.csv", index=False)
+    df_train.to_csv(settings.train_csv_path(usecase.name), index=False)
+    df_nuevo.to_csv(settings.monitor_csv_path(usecase.name), index=False)
 
-    tasa_train = df_train["churn"].mean() * 100
-    tasa_nuevo = df_nuevo["churn"].mean() * 100
-    logger.info("Entrenamiento: %d filas | tasa de churn: %.1f%%", len(df_train), tasa_train)
-    logger.info("Nuevos (monitoreo): %d filas | tasa de churn: %.1f%%", len(df_nuevo), tasa_nuevo)
+    tasa_train = df_train[usecase.target].mean() * 100
+    tasa_nuevo = df_nuevo[usecase.target].mean() * 100
+    logger.info(
+        "[%s] Entrenamiento: %d filas | tasa positiva: %.1f%%",
+        usecase.name, len(df_train), tasa_train,
+    )
+    logger.info(
+        "[%s] Nuevos (monitoreo): %d filas | tasa positiva: %.1f%%",
+        usecase.name, len(df_nuevo), tasa_nuevo,
+    )

@@ -5,7 +5,6 @@ import mlflow.sklearn
 import numpy as np
 import pytest
 
-from churn_mlops.data import FEATURES, TARGET
 from churn_mlops.train import (
     build_pipeline,
     entrenar,
@@ -39,10 +38,10 @@ def test_optimizar_umbral_devuelve_las_claves_esperadas():
     assert 0.05 <= resultado["umbral"] <= 0.95
 
 
-def test_build_pipeline_predice_probabilidades(df_train_fake):
-    pipeline = build_pipeline(n_estimators=10, max_depth=3)
-    X = df_train_fake[FEATURES]
-    y = df_train_fake[TARGET]
+def test_build_pipeline_predice_probabilidades(churn_usecase, df_train_fake):
+    pipeline = build_pipeline(churn_usecase, n_estimators=10, max_depth=3)
+    X = df_train_fake[churn_usecase.features]
+    y = df_train_fake[churn_usecase.target]
     pipeline.fit(X, y)
 
     proba = pipeline.predict_proba(X)
@@ -51,135 +50,131 @@ def test_build_pipeline_predice_probabilidades(df_train_fake):
     assert (proba >= 0).all() and (proba <= 1).all()
 
 
-def test_entrenar_devuelve_metricas_validas_y_no_toca_serving(df_train_fake, tmp_path, monkeypatch):
-    from churn_mlops.config import settings
-
-    mlflow.set_tracking_uri(f"sqlite:///{tmp_path / 'mlflow.db'}")
-    mlflow.set_experiment("test_churn_prediction")
-    monkeypatch.setattr(settings, "model_path", tmp_path / "modelo.pkl")
-    monkeypatch.setattr(settings, "train_stats_path", tmp_path / "stats.csv")
-
-    metricas = entrenar(df_train_fake, n_estimators=10, max_depth=3)
-
-    assert set(metricas) == {"accuracy", "f1_score", "precision", "recall", "umbral_optimo"}
-    assert all(0.0 <= v <= 1.0 for v in metricas.values())
-    assert (tmp_path / "stats.csv").exists()
-    # entrenar() NO debe promover a producción por sí solo
-    assert not (tmp_path / "modelo.pkl").exists()
-
-
 @pytest.fixture
-def settings_de_seleccion(tmp_path, monkeypatch):
+def entorno_aislado(tmp_path, monkeypatch):
+    """Aísla MLflow (db propia) y los paths derivados de settings (data/models
+    propios) para que cada test no toque los artefactos reales del proyecto."""
     from churn_mlops.config import settings
 
     mlflow.set_tracking_uri(f"sqlite:///{tmp_path / 'mlflow.db'}")
-    mlflow.set_experiment("test_seleccion")
-    monkeypatch.setattr(settings, "mlflow_experiment_name", "test_seleccion")
-    monkeypatch.setattr(settings, "model_path", tmp_path / "modelo.pkl")
-    monkeypatch.setattr(settings, "threshold_path", tmp_path / "umbral.json")
-    monkeypatch.setattr(settings, "pending_candidate_path", tmp_path / "candidato.json")
-    monkeypatch.setattr(settings, "registered_model_name", "test_model_registry")
-    monkeypatch.setattr(settings, "champion_alias", "champion")
+    monkeypatch.setattr(settings, "data_dir", tmp_path / "data")
+    monkeypatch.setattr(settings, "models_dir", tmp_path / "models")
     return settings
 
 
-def _crear_runs_con_recalls(recalls_por_run: dict, df_train_fake):
-    pipeline = build_pipeline(n_estimators=5, max_depth=2)
-    pipeline.fit(df_train_fake[FEATURES], df_train_fake[TARGET])
+def test_entrenar_devuelve_metricas_validas_y_no_toca_serving(
+    churn_usecase, df_train_fake, entorno_aislado
+):
+    mlflow.set_experiment(churn_usecase.mlflow_experiment_name)
+
+    metricas = entrenar(churn_usecase, df_train_fake, n_estimators=10, max_depth=3)
+
+    assert set(metricas) == {"accuracy", "f1_score", "precision", "recall", "umbral_optimo"}
+    assert all(0.0 <= v <= 1.0 for v in metricas.values())
+    assert entorno_aislado.train_stats_path(churn_usecase.name).exists()
+    # entrenar() NO debe promover a producción por sí solo
+    assert not entorno_aislado.model_path(churn_usecase.name).exists()
+
+
+def test_entrenar_funciona_con_otro_usecase(fraude_usecase, df_fraude_fake, entorno_aislado):
+    """Prueba de genericidad: el motor no debería tener nada hardcodeado de churn."""
+    mlflow.set_experiment(fraude_usecase.mlflow_experiment_name)
+
+    metricas = entrenar(fraude_usecase, df_fraude_fake, n_estimators=10, max_depth=3)
+
+    assert set(metricas) == {"accuracy", "f1_score", "precision", "recall", "umbral_optimo"}
+
+
+def _crear_runs_con_recalls(usecase, recalls_por_run: dict, df_train_fake):
+    pipeline = build_pipeline(usecase, n_estimators=5, max_depth=2)
+    pipeline.fit(df_train_fake[usecase.features], df_train_fake[usecase.target])
 
     for nombre, recall in recalls_por_run.items():
         with mlflow.start_run(run_name=nombre):
             mlflow.log_metric("recall", recall)
             mlflow.log_param("umbral_optimo", 0.35)
             mlflow.sklearn.log_model(
-                pipeline, "modelo", registered_model_name="test_model_registry"
+                pipeline, "modelo", registered_model_name=usecase.registered_model_name
             )
 
 
 def test_identificar_mejor_candidato_elige_la_metrica_mas_alta(
-    df_train_fake, settings_de_seleccion
+    churn_usecase, df_train_fake, entorno_aislado
 ):
-    _crear_runs_con_recalls({"run_bajo": 0.3, "run_ganador": 0.9, "run_medio": 0.6}, df_train_fake)
+    mlflow.set_experiment(churn_usecase.mlflow_experiment_name)
+    _crear_runs_con_recalls(
+        churn_usecase, {"run_bajo": 0.3, "run_ganador": 0.9, "run_medio": 0.6}, df_train_fake
+    )
 
-    candidato = identificar_mejor_candidato(metric="recall")
+    candidato = identificar_mejor_candidato(churn_usecase, metric="recall")
 
     assert candidato["run_name"] == "run_ganador"
     assert candidato["metric_value"] == 0.9
 
 
 def test_identificar_mejor_candidato_no_toca_serving_ni_registry(
-    df_train_fake, settings_de_seleccion
+    churn_usecase, df_train_fake, entorno_aislado
 ):
-    _crear_runs_con_recalls({"run_unico": 0.7}, df_train_fake)
+    mlflow.set_experiment(churn_usecase.mlflow_experiment_name)
+    _crear_runs_con_recalls(churn_usecase, {"run_unico": 0.7}, df_train_fake)
 
-    identificar_mejor_candidato(metric="recall")
+    identificar_mejor_candidato(churn_usecase, metric="recall")
 
     # el candidato queda pendiente, pero NADA se promovió todavía
-    assert settings_de_seleccion.pending_candidate_path.exists()
-    assert not settings_de_seleccion.model_path.exists()
-    assert not settings_de_seleccion.threshold_path.exists()
+    assert entorno_aislado.pending_candidate_path(churn_usecase.name).exists()
+    assert not entorno_aislado.model_path(churn_usecase.name).exists()
+    assert not entorno_aislado.threshold_path(churn_usecase.name).exists()
 
 
-def test_identificar_mejor_candidato_sin_runs_lanza_error(tmp_path, monkeypatch):
-    from churn_mlops.config import settings
-
-    mlflow.set_tracking_uri(f"sqlite:///{tmp_path / 'mlflow_vacio.db'}")
-    mlflow.set_experiment("test_seleccion_vacio")
-    monkeypatch.setattr(settings, "mlflow_experiment_name", "test_seleccion_vacio")
-
+def test_identificar_mejor_candidato_sin_runs_lanza_error(churn_usecase, entorno_aislado):
     with pytest.raises(RuntimeError):
-        identificar_mejor_candidato(metric="recall")
+        identificar_mejor_candidato(churn_usecase, metric="recall")
 
 
 def test_promover_a_produccion_copia_el_modelo_y_limpia_pendiente(
-    df_train_fake, settings_de_seleccion
+    churn_usecase, df_train_fake, entorno_aislado
 ):
-    _crear_runs_con_recalls({"run_ganador": 0.9}, df_train_fake)
-    candidato = identificar_mejor_candidato(metric="recall")
-    assert settings_de_seleccion.pending_candidate_path.exists()
+    mlflow.set_experiment(churn_usecase.mlflow_experiment_name)
+    _crear_runs_con_recalls(churn_usecase, {"run_ganador": 0.9}, df_train_fake)
+    candidato = identificar_mejor_candidato(churn_usecase, metric="recall")
+    assert entorno_aislado.pending_candidate_path(churn_usecase.name).exists()
 
-    resultado = promover_a_produccion(candidato)
+    resultado = promover_a_produccion(churn_usecase, candidato)
 
     assert resultado["run_name"] == "run_ganador"
-    assert settings_de_seleccion.model_path.exists()
-    umbral_guardado = json.loads(settings_de_seleccion.threshold_path.read_text())
+    assert entorno_aislado.model_path(churn_usecase.name).exists()
+    umbral_guardado = json.loads(entorno_aislado.threshold_path(churn_usecase.name).read_text())
     assert umbral_guardado["umbral"] == 0.35
     # aprobado y promovido: ya no debería quedar nada pendiente
-    assert not settings_de_seleccion.pending_candidate_path.exists()
+    assert not entorno_aislado.pending_candidate_path(churn_usecase.name).exists()
 
 
 def test_promover_a_produccion_lee_el_pendiente_si_no_se_pasa_candidato(
-    df_train_fake, settings_de_seleccion
+    churn_usecase, df_train_fake, entorno_aislado
 ):
-    _crear_runs_con_recalls({"run_unico": 0.5}, df_train_fake)
-    identificar_mejor_candidato(metric="recall")
+    mlflow.set_experiment(churn_usecase.mlflow_experiment_name)
+    _crear_runs_con_recalls(churn_usecase, {"run_unico": 0.5}, df_train_fake)
+    identificar_mejor_candidato(churn_usecase, metric="recall")
 
-    resultado = promover_a_produccion()  # sin argumento: debe leer pending_candidate_path
+    resultado = promover_a_produccion(churn_usecase)  # sin candidato: lee pending_candidate_path
 
     assert resultado["run_name"] == "run_unico"
-    assert settings_de_seleccion.model_path.exists()
+    assert entorno_aislado.model_path(churn_usecase.name).exists()
 
 
-def test_promover_a_produccion_sin_candidato_pendiente_lanza_error(tmp_path, monkeypatch):
-    from churn_mlops.config import settings
-
-    monkeypatch.setattr(settings, "pending_candidate_path", tmp_path / "no_existe.json")
-
+def test_promover_a_produccion_sin_candidato_pendiente_lanza_error(churn_usecase, entorno_aislado):
     with pytest.raises(RuntimeError):
-        promover_a_produccion()
+        promover_a_produccion(churn_usecase)
 
 
 def test_reentrenar_con_datos_combinados_usa_ambos_datasets_y_no_promueve(
-    df_train_fake, df_monitor_fake, settings_de_seleccion, monkeypatch
+    churn_usecase, df_train_fake, df_monitor_fake, entorno_aislado
 ):
-    monkeypatch.setattr(settings_de_seleccion, "mlflow_experiment_name", "test_reentrenamiento")
-    mlflow.set_experiment("test_reentrenamiento")
-
-    candidato = reentrenar_con_datos_combinados(df_train_fake, df_monitor_fake)
+    candidato = reentrenar_con_datos_combinados(churn_usecase, df_train_fake, df_monitor_fake)
 
     # deja un candidato pendiente, pero no promueve solo
-    assert settings_de_seleccion.pending_candidate_path.exists()
-    assert not settings_de_seleccion.model_path.exists()
+    assert entorno_aislado.pending_candidate_path(churn_usecase.name).exists()
+    assert not entorno_aislado.model_path(churn_usecase.name).exists()
 
     client = mlflow.tracking.MlflowClient()
     run = client.get_run(candidato["run_id"])

@@ -1,9 +1,10 @@
 """Informe descriptivo de todos los modelos entrenados + conclusiones.
 
 Junta hiperparámetros y métricas de TODOS los runs históricos del
-experimento en MLflow (no solo la última corrida) y le pide a un LLM que
-redacte un análisis en lenguaje natural: qué se probó, qué configuración
-rindió mejor y por qué, tendencias observadas, y una conclusión.
+experimento de un caso de uso en MLflow (no solo la última corrida) y le
+pide a un LLM que redacte un análisis en lenguaje natural: qué se probó,
+qué configuración rindió mejor y por qué, tendencias observadas, y una
+conclusión.
 
 Soporta dos proveedores (settings.llm_provider):
 - "ollama" (default): local, gratis, sin API key — requiere tener Ollama
@@ -17,21 +18,24 @@ import requests
 from mlflow.tracking import MlflowClient
 
 from churn_mlops.config import settings
+from churn_mlops.usecases.base import UseCase
 
 logger = logging.getLogger(__name__)
 
 
-def recolectar_runs() -> list[dict]:
-    """Junta hiperparámetros y métricas de TODOS los runs del experimento,
-    ordenados cronológicamente."""
+def recolectar_runs(usecase: UseCase) -> list[dict]:
+    """Junta hiperparámetros y métricas de TODOS los runs del experimento
+    de `usecase`, ordenados cronológicamente."""
     client = MlflowClient()
-    experimento = client.get_experiment_by_name(settings.mlflow_experiment_name)
+    experimento = client.get_experiment_by_name(usecase.mlflow_experiment_name)
     if experimento is None:
-        raise RuntimeError(f"No existe el experimento '{settings.mlflow_experiment_name}'.")
+        raise RuntimeError(f"No existe el experimento '{usecase.mlflow_experiment_name}'.")
 
     runs = client.search_runs([experimento.experiment_id], order_by=["start_time ASC"])
     if not runs:
-        raise RuntimeError("No hay runs en el experimento. Corré train.py primero.")
+        raise RuntimeError(
+            f"No hay runs en el experimento. Corré train.py --usecase {usecase.name} primero."
+        )
 
     return [
         {
@@ -70,17 +74,15 @@ def _tabla_markdown(runs: list[dict]) -> str:
     return encabezado + separador + filas
 
 
-def _construir_prompt(tabla: str) -> str:
+def _construir_prompt(usecase: UseCase, tabla: str) -> str:
     return (
-        "Sos un ingeniero de ML senior escribiendo un informe interno sobre "
-        "los experimentos de un modelo de predicción de churn (RandomForest "
-        "sobre datos reales de clientes de telecom, IBM Telco Customer Churn). "
+        f"Sos un ingeniero de ML senior escribiendo un informe interno sobre "
+        f"los experimentos de un modelo de {usecase.descripcion} (RandomForest). "
         f"Te paso una tabla con todos los runs entrenados hasta ahora:\n\n{tabla}\n\n"
         "Escribí un informe descriptivo en español, con estas secciones:\n"
         "1. Resumen de qué se probó (rango de hiperparámetros, cuántos runs)\n"
         "2. Qué configuración rindió mejor y por qué (priorizando recall, ya "
-        "que en churn un falso negativo —cliente que se va sin ser detectado— "
-        "cuesta más que un falso positivo)\n"
+        "que un falso negativo cuesta más que un falso positivo en este dominio)\n"
         "3. Tendencias observadas (¿más árboles/profundidad ayudó o no? "
         "¿hay señales de overfitting u underfitting?)\n"
         "4. Conclusión y recomendación final\n"
@@ -110,11 +112,11 @@ def _llamar_anthropic(prompt: str) -> str:
     return respuesta.content[0].text
 
 
-def generar_informe(runs: list[dict] | None = None) -> str:
+def generar_informe(usecase: UseCase, runs: list[dict] | None = None) -> str:
     """Genera el informe completo (tabla + análisis del LLM) en Markdown."""
-    runs = runs if runs is not None else recolectar_runs()
+    runs = runs if runs is not None else recolectar_runs(usecase)
     tabla = _tabla_markdown(runs)
-    prompt = _construir_prompt(tabla)
+    prompt = _construir_prompt(usecase, tabla)
 
     if settings.llm_provider == "ollama":
         analisis = _llamar_ollama(prompt)
@@ -131,5 +133,5 @@ def generar_informe(runs: list[dict] | None = None) -> str:
             f"llm_provider desconocido: '{settings.llm_provider}' (usar 'ollama' o 'anthropic')"
         )
 
-    titulo = f"# Informe de experimentos — {settings.registered_model_name}"
+    titulo = f"# Informe de experimentos — {usecase.registered_model_name}"
     return f"{titulo}\n\n{tabla}\n## Análisis\n\n{analisis}\n"

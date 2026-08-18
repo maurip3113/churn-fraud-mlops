@@ -10,13 +10,10 @@ __pycache__/
 mlflow.db
 mlruns/
 
-# modelo y datos derivados (se regeneran con prepare_data.py / train.py)
-models/*.pkl
-models/*.json
-data/telco_churn_raw.csv
-data/clientes_entrenamiento.csv
-data/clientes_nuevos.csv
-data/estadisticas_entrenamiento.csv
+# modelo y datos derivados, uno por caso de uso (se regeneran con
+# prepare_data.py / train.py / aprobar_modelo.py)
+data/*/
+models/*/
 informes/
 
 *.log

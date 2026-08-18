@@ -1,10 +1,12 @@
-"""Monitoreo de data drift + reporte automático generado por un LLM.
+"""Motor genérico de monitoreo de drift + reporte automático de un LLM.
 
-Numéricas (tenure, MonthlyCharges, TotalCharges): test de Kolmogorov-Smirnov.
-Categóricas (Contract, InternetService, etc.): test de chi-cuadrado sobre las
-frecuencias de cada categoría. Mezclar ambos tipos de features bajo un único
-test (como haría un enfoque naive) no es estadísticamente correcto — KS
-asume variables continuas.
+Igual que train.py, no conoce columnas concretas: recibe una instancia de
+UseCase para saber qué features numéricas/categóricas comparar.
+
+Numéricas: test de Kolmogorov-Smirnov. Categóricas: test de chi-cuadrado
+sobre las frecuencias de cada categoría. Mezclar ambos tipos de features
+bajo un único test (como haría un enfoque naive) no es estadísticamente
+correcto — KS asume variables continuas.
 """
 
 import logging
@@ -13,7 +15,7 @@ import pandas as pd
 from scipy import stats
 
 from churn_mlops.config import settings
-from churn_mlops.data import CAT_FEATURES, NUM_FEATURES
+from churn_mlops.usecases.base import UseCase
 
 logger = logging.getLogger(__name__)
 
@@ -37,18 +39,20 @@ def _test_categorico(train: pd.Series, nuevo: pd.Series) -> tuple[float, str, st
     return p_valor, "chi2", f"'{top_train}' / '{top_nuevo}'"
 
 
-def detectar_drift(df_train: pd.DataFrame, df_nuevo: pd.DataFrame) -> list[dict]:
+def detectar_drift(
+    usecase: UseCase, df_train: pd.DataFrame, df_nuevo: pd.DataFrame
+) -> list[dict]:
     resultados = []
     umbral = settings.drift_p_value_threshold
 
-    for feature in NUM_FEATURES:
+    for feature in usecase.num_features:
         p_valor, test, resumen = _test_numerico(df_train[feature], df_nuevo[feature])
         resultados.append(
             {"feature": feature, "test": test, "p_valor": round(p_valor, 4),
              "drift_detectado": bool(p_valor < umbral), "resumen_train_vs_nuevo": resumen}
         )
 
-    for feature in CAT_FEATURES:
+    for feature in usecase.cat_features:
         p_valor, test, resumen = _test_categorico(df_train[feature], df_nuevo[feature])
         resultados.append(
             {"feature": feature, "test": test, "p_valor": round(p_valor, 4),
@@ -81,7 +85,7 @@ def evaluar_necesidad_reentrenamiento(resultados: list[dict]) -> dict:
     }
 
 
-def generar_reporte_llm(resultados: list[dict]) -> str:
+def generar_reporte_llm(usecase: UseCase, resultados: list[dict]) -> str:
     """Usa Claude para redactar un resumen ejecutivo del drift detectado."""
     resumen_datos = "\n".join(
         f"- {r['feature']} (test {r['test']}): p-valor={r['p_valor']}, "
@@ -91,12 +95,12 @@ def generar_reporte_llm(resultados: list[dict]) -> str:
     )
 
     prompt = (
-        "Sos un ingeniero de ML analizando resultados de un test de data drift "
-        "sobre un modelo de predicción de churn de telecom. Te paso los resultados "
-        "por feature (comparando la base histórica de entrenamiento contra la "
-        "cohorte de clientes más nuevos). Escribí un resumen ejecutivo breve "
-        "(máximo 4 líneas) para un equipo no técnico, explicando qué cambió y "
-        "si recomendás reentrenar el modelo.\n\n"
+        f"Sos un ingeniero de ML analizando resultados de un test de data drift "
+        f"sobre un modelo de {usecase.descripcion}. Te paso los resultados por "
+        "feature (comparando la base histórica de entrenamiento contra la "
+        "cohorte más reciente). Escribí un resumen ejecutivo breve (máximo 4 "
+        "líneas) para un equipo no técnico, explicando qué cambió y si "
+        "recomendás reentrenar el modelo.\n\n"
         f"RESULTADOS:\n{resumen_datos}"
     )
 
