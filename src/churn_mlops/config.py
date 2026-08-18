@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-sonnet-4-6"
 
+    # Proveedor de LLM para generar_informe.py: "ollama" (local, gratis, sin
+    # API key — requiere tener Ollama corriendo) o "anthropic" (requiere
+    # ANTHROPIC_API_KEY con crédito).
+    llm_provider: str = "ollama"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3.2"
+
     data_dir: Path = ROOT_DIR / "data"
     models_dir: Path = ROOT_DIR / "models"
 

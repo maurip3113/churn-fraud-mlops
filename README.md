@@ -53,6 +53,7 @@ src/churn_mlops/       paquete instalable (pip install -e .)
   serve.py                lógica de la API FastAPI
   monitor.py              detección de drift (KS + chi-cuadrado) + reporte LLM
                             + diagnóstico de reentrenamiento
+  informe.py              informe descriptivo de todos los runs (Ollama/Claude)
   logging_config.py       logging compartido
 
 prepare_data.py         entrypoint: genera los CSV de train/monitor
@@ -63,6 +64,7 @@ monitor.py              entrypoint: corre el test de drift + reporte, y si el
                           pendiente de aprobación, nunca se auto-promueve)
 aprobar_modelo.py       entrypoint: gate humano — revisa el candidato pendiente
                           y, si se confirma, lo promueve a producción
+generar_informe.py      entrypoint: informe descriptivo de todos los experimentos
 serve.py                entrypoint: expone `app` para uvicorn
 
 tests/                  pytest (datos, drift, entrenamiento, API)
@@ -182,6 +184,40 @@ junto con el modelo aprobado — `serve.py` lo carga en el arranque
 `POST /predict` incluye `umbral_usado`). Si no existe ese archivo (por
 ejemplo, antes de la primera aprobación), cae al default de
 `settings.prediction_threshold_default` (0.5).
+
+### Informe descriptivo de todos los experimentos
+
+`generar_informe.py` junta hiperparámetros y métricas de **todos los runs
+históricos** del experimento en MLflow y le pide a un LLM que redacte un
+análisis: qué se probó, qué configuración rindió mejor y por qué,
+tendencias (over/underfitting), y una conclusión.
+
+Por default usa **Ollama local** (`settings.llm_provider = "ollama"`) —
+gratis, sin API key, sin depender de crédito de ningún proveedor:
+
+```bash
+# 1. Instalar Ollama: https://ollama.com/download
+# 2. Bajar un modelo chico (una sola vez)
+ollama pull llama3.2
+# 3. Generar el informe
+python generar_informe.py
+```
+
+Para usar Claude en cambio (mejor calidad de análisis, pero requiere
+`ANTHROPIC_API_KEY` con crédito), seteá en `.env`:
+
+```
+LLM_PROVIDER=anthropic
+```
+
+**Limitación conocida**: `llama3.2` (3B parámetros) es liviano y corre en
+cualquier PC, pero razona peor sobre tablas numéricas que un modelo grande
+— en una prueba real llegó a señalar como "mejor en recall" un run que no
+tenía el recall más alto de la tabla, y confundió `accuracy` con
+`precision` en la traducción. Sirve para un borrador rápido y gratis; para
+un informe que se vaya a usar en una decisión real, conviene revisar los
+números contra la tabla (que sí es exacta, generada directamente desde
+MLflow) o usar Claude.
 
 ### Tests y lint
 
